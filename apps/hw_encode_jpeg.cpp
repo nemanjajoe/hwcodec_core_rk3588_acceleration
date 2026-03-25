@@ -1,0 +1,71 @@
+#include "hwcodec_core/encoder.hpp"
+
+#include <fstream>
+#include <iostream>
+#include <string>
+#include <vector>
+
+namespace {
+
+bool get_arg(int argc, char** argv, const std::string& key, std::string& out) {
+  for (int i = 1; i + 1 < argc; ++i) {
+    if (argv[i] == key) {
+      out = argv[i + 1];
+      return true;
+    }
+  }
+  return false;
+}
+
+int get_arg_int(int argc, char** argv, const std::string& key, int default_value) {
+  std::string value;
+  if (!get_arg(argc, argv, key, value)) {
+    return default_value;
+  }
+  return std::stoi(value);
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+  std::string input_path;
+  std::string output_path;
+  if (!get_arg(argc, argv, "--input", input_path) || !get_arg(argc, argv, "--output", output_path)) {
+    std::cerr << "Usage: hw_encode_jpeg --input in.jpg --output out.h265 [--width 1920 --height 1080 --fps 25]" << std::endl;
+    return 1;
+  }
+
+  std::ifstream ifs(input_path, std::ios::binary);
+  if (!ifs) {
+    std::cerr << "open input failed: " << input_path << std::endl;
+    return 1;
+  }
+  std::vector<uint8_t> jpeg((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+
+  hwcodec_core::EncoderConfig cfg;
+  cfg.width = get_arg_int(argc, argv, "--width", 1920);
+  cfg.height = get_arg_int(argc, argv, "--height", 1080);
+  cfg.fps = get_arg_int(argc, argv, "--fps", 25);
+
+  hwcodec_core::Encoder encoder;
+  if (!encoder.init(cfg)) {
+    std::cerr << "encoder init failed" << std::endl;
+    return 1;
+  }
+
+  hwcodec_core::EncodedPacket packet;
+  if (!encoder.encode_jpeg(jpeg.data(), jpeg.size(), packet)) {
+    std::cerr << "encode failed" << std::endl;
+    return 1;
+  }
+
+  std::ofstream ofs(output_path, std::ios::binary);
+  if (!ofs) {
+    std::cerr << "open output failed: " << output_path << std::endl;
+    return 1;
+  }
+  ofs.write(reinterpret_cast<const char*>(packet.payload.data()), static_cast<std::streamsize>(packet.payload.size()));
+
+  std::cout << "encoded bytes=" << packet.payload.size() << " keyframe=" << packet.is_keyframe << std::endl;
+  return 0;
+}

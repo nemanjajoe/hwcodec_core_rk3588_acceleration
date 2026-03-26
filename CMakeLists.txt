@@ -8,17 +8,28 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 find_package(OpenCV REQUIRED)
 find_package(PkgConfig REQUIRED)
 
-pkg_check_modules(AVCODEC REQUIRED libavcodec)
-pkg_check_modules(AVFORMAT REQUIRED libavformat)
-pkg_check_modules(AVUTIL REQUIRED libavutil)
-pkg_check_modules(SWSCALE REQUIRED libswscale)
-pkg_check_modules(MPP REQUIRED rockchip_mpp)
-
-find_library(RGA_LIB rga REQUIRED)
-
 option(HWCODEC_FFMPEG_RPATH "Use /usr/lib/axcl/ffmpeg/lib in RPATH" ON)
 option(HWCODEC_BUILD_APPS "Build standalone CLI apps" ON)
 set(HWCODEC_FFMPEG_ROOT "/usr/lib/axcl/ffmpeg" CACHE PATH "Hardware FFmpeg root")
+set(HWCODEC_FFMPEG_PKGCONFIG_DIR "${HWCODEC_FFMPEG_ROOT}/lib/pkgconfig" CACHE PATH "FFmpeg pkg-config dir")
+
+# Force pkg-config to prefer the Rockchip FFmpeg first, so both standalone apps
+# and ROS wrappers resolve the same hevc_rkmpp-capable libraries.
+if(EXISTS "${HWCODEC_FFMPEG_PKGCONFIG_DIR}")
+  if(DEFINED ENV{PKG_CONFIG_PATH} AND NOT "$ENV{PKG_CONFIG_PATH}" STREQUAL "")
+    set(ENV{PKG_CONFIG_PATH} "${HWCODEC_FFMPEG_PKGCONFIG_DIR}:$ENV{PKG_CONFIG_PATH}")
+  else()
+    set(ENV{PKG_CONFIG_PATH} "${HWCODEC_FFMPEG_PKGCONFIG_DIR}")
+  endif()
+endif()
+
+pkg_check_modules(AVCODEC REQUIRED IMPORTED_TARGET libavcodec>=60)
+pkg_check_modules(AVFORMAT REQUIRED IMPORTED_TARGET libavformat>=60)
+pkg_check_modules(AVUTIL REQUIRED IMPORTED_TARGET libavutil>=58)
+pkg_check_modules(SWSCALE REQUIRED IMPORTED_TARGET libswscale)
+pkg_check_modules(MPP REQUIRED IMPORTED_TARGET rockchip_mpp)
+
+find_library(RGA_LIB rga REQUIRED)
 
 add_library(hwcodec_core STATIC
   src/encoder.cpp
@@ -41,11 +52,11 @@ target_include_directories(hwcodec_core
 target_link_libraries(hwcodec_core
   PUBLIC
     ${OpenCV_LIBRARIES}
-    ${AVCODEC_LIBRARIES}
-    ${AVFORMAT_LIBRARIES}
-    ${AVUTIL_LIBRARIES}
-    ${SWSCALE_LIBRARIES}
-    ${MPP_LIBRARIES}
+    PkgConfig::AVCODEC
+    PkgConfig::AVFORMAT
+    PkgConfig::AVUTIL
+    PkgConfig::SWSCALE
+    PkgConfig::MPP
     ${RGA_LIB}
     pthread
     dl

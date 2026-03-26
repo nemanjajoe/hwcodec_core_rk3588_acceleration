@@ -86,9 +86,11 @@ cmake --build build -j8
 cmake --install build
 ```
 
-## 5. 核心接口说明
+## 5. API 参考（Google 风格）
 
-### 5.1 公共数据结构
+本节采用“概览 -> 签名 -> 参数 -> 返回值 -> 失败语义 -> 线程安全”的结构，便于快速查阅与联调。
+
+### 5.1 数据契约
 
 头文件：`include/hwcodec_core/types.hpp`
 
@@ -100,131 +102,152 @@ struct EncodedPacket {
 };
 ```
 
-字段说明：
+字段定义：
 
-- `stamp_ns`：时间戳（纳秒）
-- `is_keyframe`：是否关键帧
-- `payload`：码流数据
+- `stamp_ns`：可选时间戳（纳秒）。
+- `is_keyframe`：关键帧标记（IDR/CRA）。
+- `payload`：HEVC 码流字节。
+  - 推荐格式：Annex-B（`00 00 01` 或 `00 00 00 01` 起始码）。
+  - 建议关键帧携带 VPS/SPS/PPS，确保任意时刻下游可恢复解码。
 
-### 5.2 编码接口 `Encoder`
+### 5.2 编码 API：`hwcodec_core::Encoder`
 
 头文件：`include/hwcodec_core/encoder.hpp`
 
-配置项 `EncoderConfig`：
+#### 5.2.1 生命周期
 
-- `codec_name`：默认 `hevc_rkmpp`
-- `width` / `height`：编码目标分辨率
-- `fps`：帧率
-- `bitrate`：码率
-- `gop`：GOP长度
-- `bf`：B帧数量
-- `rc_mode`：码率控制模式（默认 `cbr`）
-- `profile`：编码profile（默认 `main`）
-- `qp_min` / `qp_max`：CBR模式下QP范围（默认 `10/48`）
-- `prefer_mpp_jpeg_decoder`：是否优先使用MPP硬件JPEG解码（默认 `true`）
-- `jpeg_mpp_output_timeout_ms`：MPP JPEG取帧超时，`0`非阻塞，`<0`阻塞，`>0`超时毫秒（默认 `0`）
-- `jpeg_mpp_put_retry` / `jpeg_mpp_get_retry`：MPP JPEG送包/取帧重试次数（默认 `5/20`）
-- `jpeg_mpp_put_retry_sleep_ms` / `jpeg_mpp_get_retry_sleep_ms`：重试间隔毫秒（默认 `1/1`）
-- `jpeg_mpp_set_packet_eos`：送JPEG包时是否设置EOS（默认 `false`）
-- `debug`：调试日志开关（默认 `false`，也可用环境变量 `HWCODEC_DEBUG=1`）
+签名：
 
-主要方法：
+- `Encoder();`
+- `~Encoder();`
+- `bool init(const EncoderConfig& config);`
 
-- `bool init(const EncoderConfig& config)`
-- `bool encode_bgr(const uint8_t* bgr_data, int width, int height, int stride_bytes, EncodedPacket& out_packet)`
-- `bool encode_jpeg(const uint8_t* jpeg_data, size_t jpeg_size, EncodedPacket& out_packet)`
-- `bool submit_bgr(const uint8_t* bgr_data, int width, int height, int stride_bytes)`
-- `bool submit_jpeg(const uint8_t* jpeg_data, size_t jpeg_size)`
-- `bool receive_packet(EncodedPacket& out_packet)`
-- `bool flush(EncodedPacket& out_packet)`：拉取编码器内部延迟输出包（如首帧EAGAIN场景）
+前置条件：
 
-### 5.3 解码接口 `Decoder`
+- `init()` 必须在任何编码调用前执行一次。
+- `config.width/height/fps` 必须为正数。
+
+返回值与失败语义：
+
+- `true`：初始化成功，可进入编码阶段。
+- `false`：初始化失败，常见原因为编码器不可用、参数非法、依赖库不可达。
+
+线程安全：
+
+- `Encoder` 实例不是可重入对象；同一实例应由单线程驱动调用接口。
+
+#### 5.2.2 同步编码接口
+
+签名：
+
+- `bool encode_bgr(const uint8_t* bgr_data, int width, int height, int stride_bytes, EncodedPacket& out_packet);`
+- `bool encode_jpeg(const uint8_t* jpeg_data, size_t jpeg_size, EncodedPacket& out_packet);`
+
+参数说明：
+
+- `bgr_data/jpeg_data`：输入缓冲区首地址，调用期间必须有效。
+- `stride_bytes`：BGR 行步长（字节），必须 `>= width * 3`。
+- `out_packet`：输出参数，成功时填充 `payload/is_keyframe/stamp_ns`。
+
+返回值与失败语义：
+
+- `true`：本次调用产出有效包。
+- `false`：本次调用未产包或失败（输入非法、内部缓冲、编码失败等）。
+
+注意事项：
+
+- `false` 不总是致命错误，实时编码场景可能因内部缓冲而暂未产包。
+- 不要在实时流中每帧调用 `flush()`，`flush()` 语义是发送 EOS 并进入 drain。
+
+#### 5.2.3 异步流水线接口
+
+签名：
+
+- `bool submit_bgr(...);`
+- `bool submit_jpeg(...);`
+- `bool receive_packet(EncodedPacket& out_packet);`
+
+行为说明：
+
+- 先 `submit_*`，后 `receive_packet()`，结果按 FIFO 顺序返回。
+- 适用于吞吐优先场景（批量送入，多次取包）。
+
+#### 5.2.4 `flush()` 接口语义
+
+签名：
+
+- `bool flush(EncodedPacket& out_packet);`
+
+语义：
+
+- 触发编码器 drain，尝试拉取延迟输出包。
+
+使用场景：
+
+- 文件结束、会话结束、离线批处理收尾。
+
+不推荐场景：
+
+- 实时连续视频流的逐帧主路径。
+
+#### 5.2.5 `EncoderConfig` 关键字段
+
+- `codec_name`：默认 `hevc_rkmpp`。
+- `bitrate/gop/bf/rc_mode/profile/qp_min/qp_max`：码率与质量控制。
+- `prefer_mpp_jpeg_decoder/jpeg_mpp_*`：JPEG 硬解路径调优。
+- `debug`：详细日志开关（亦可通过环境变量 `HWCODEC_DEBUG=1` 打开）。
+
+### 5.3 解码 API：`hwcodec_core::Decoder`
 
 头文件：`include/hwcodec_core/decoder.hpp`
 
-配置项 `DecoderConfig`：
+#### 5.3.1 生命周期
 
-- `width` / `height`：目标输出分辨率
-- `jpeg_quality`：JPEG输出质量
-- `mpp_split_mode`：H.265 解码 split 模式（默认 `1`）
-- `mpp_output_timeout_ms`：MPP取帧超时，`0`非阻塞，`<0`阻塞，`>0`超时毫秒（默认 `0`）
-- `mpp_put_retry` / `mpp_get_retry`：MPP送包/取帧重试次数（默认 `5/15`）
-- `mpp_put_retry_sleep_ms` / `mpp_get_retry_sleep_ms`：重试间隔毫秒（默认 `2/1`）
-- `debug`：调试开关（默认 `false`）
+签名：
 
-主要方法：
+- `Decoder();`
+- `~Decoder();`
+- `bool init(const DecoderConfig& config);`
 
-- `bool init(const DecoderConfig& config)`
-- `bool decode_to_bgr(const EncodedPacket& packet, cv::Mat& bgr_out)`
-- `bool decode_to_jpeg(const EncodedPacket& packet, std::vector<uint8_t>& jpeg_out)`
+前置条件：
+
+- `init()` 必须先于任何 `decode_*` 调用。
+
+返回值与失败语义：
+
+- `true`：初始化成功。
+- `false`：初始化失败（参数非法、MPP/RGA/软解初始化失败）。
+
+#### 5.3.2 解码接口
+
+签名：
+
+- `bool decode_to_bgr(const EncodedPacket& packet, cv::Mat& bgr_out);`
+- `bool decode_to_jpeg(const EncodedPacket& packet, std::vector<uint8_t>& jpeg_out);`
+
+输入要求：
+
+- `packet.payload` 必须是可解析的 HEVC 码流包。
+- 推荐输入为 Annex-B，并保证关键参数集可获取。
+
+行为说明：
+
+- 首选 MPP 硬解 + RGA 转换。
+- 硬解路径失败时自动回退 FFmpeg 软解 HEVC。
+- `decode_to_jpeg()` 内部流程为 `decode_to_bgr()` 后再 JPEG 编码。
+
+#### 5.3.3 `DecoderConfig` 关键字段
+
+- `mpp_split_mode`：H.265 parser split 模式。
+- `mpp_output_timeout_ms`：`0` 非阻塞，`<0` 阻塞，`>0` 超时毫秒。
+- `mpp_put_retry/mpp_get_retry`：送包与取帧重试次数。
+- `debug`：详细日志开关。
 
 ### 5.4 API 使用建议
 
-#### 5.4.1 编码（同步接口）
-
-适合低吞吐或调用方希望“输入一帧，立即拿一帧结果”的场景。
-
-```cpp
-hwcodec_core::EncoderConfig cfg;
-cfg.codec_name = "hevc_rkmpp";
-cfg.width = 1920;
-cfg.height = 1080;
-cfg.fps = 25;
-cfg.bitrate = 4000000;
-cfg.gop = 25;
-cfg.bf = 0;
-cfg.rc_mode = "cbr";
-cfg.profile = "main";
-cfg.qp_min = 10;
-cfg.qp_max = 48;
-cfg.prefer_mpp_jpeg_decoder = true;
-cfg.jpeg_mpp_output_timeout_ms = 0;
-cfg.jpeg_mpp_put_retry = 5;
-cfg.jpeg_mpp_get_retry = 20;
-cfg.jpeg_mpp_put_retry_sleep_ms = 1;
-cfg.jpeg_mpp_get_retry_sleep_ms = 1;
-cfg.jpeg_mpp_set_packet_eos = false;
-cfg.debug = false;
-
-hwcodec_core::Encoder enc;
-if (!enc.init(cfg)) {
-  // init failed
-}
-
-hwcodec_core::EncodedPacket out;
-if (!enc.encode_jpeg(jpeg.data(), jpeg.size(), out)) {
-  // 某些编码器首帧可能返回EAGAIN，尝试flush拿延迟包
-  if (!enc.flush(out)) {
-    // encode failed
-  }
-}
-```
-
-#### 5.4.2 编码（异步流水线接口）
-
-适合高吞吐场景，先批量 `submit_*`，再按 FIFO `receive_packet`。
-
-```cpp
-hwcodec_core::Encoder enc;
-enc.init(cfg);
-
-for (const auto& frame : frames) {
-  enc.submit_jpeg(frame.data(), frame.size());
-}
-
-for (size_t i = 0; i < frames.size(); ++i) {
-  hwcodec_core::EncodedPacket pkt;
-  if (enc.receive_packet(pkt)) {
-    // consume pkt
-  }
-}
-```
-
-#### 5.4.3 解码行为说明
-
-- 优先尝试 MPP 硬解 + RGA 转换。
-- 若硬解路径失败（例如取帧超时、stride无效、RGA失败），自动回退 FFmpeg 软解 HEVC，保证可用性。
-- `decode_to_jpeg` 内部先 `decode_to_bgr`，再做 JPEG 编码。
+- 实时在线流：优先同步接口，允许偶发“本帧未产包”，不要逐帧 `flush()`。
+- 离线批处理：完成全部输入后调用一次 `flush()` 拉取尾包。
+- 跨进程/跨节点传输：固定 `EncodedPacket` 契约，避免自定义二次封装。
 
 ## 6. 使用示例
 

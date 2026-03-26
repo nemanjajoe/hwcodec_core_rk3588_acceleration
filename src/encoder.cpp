@@ -14,6 +14,7 @@
 #include <rga/im2d.h>
 
 extern "C" {
+#include <libavcodec/bsf.h>
 #include <libavcodec/avcodec.h>
 #include <libavutil/error.h>
 #include <libavutil/imgutils.h>
@@ -346,6 +347,15 @@ class Encoder::Impl {
   ~Impl() {
     stop_worker();
 
+    if (bsf_pkt_) {
+      av_packet_free(&bsf_pkt_);
+      bsf_pkt_ = nullptr;
+    }
+    if (bsf_ctx_) {
+      av_bsf_free(&bsf_ctx_);
+      bsf_ctx_ = nullptr;
+    }
+
     if (pkt_) {
       av_packet_free(&pkt_);
       pkt_ = nullptr;
@@ -454,6 +464,13 @@ class Encoder::Impl {
     pkt_ = av_packet_alloc();
     if (!pkt_) {
       return false;
+    }
+
+    if (ctx_->codec_id == AV_CODEC_ID_HEVC) {
+      if (!init_hevc_annexb_bsf()) {
+        std::cerr << "[Encoder] failed to init hevc_mp4toannexb bsf" << std::endl;
+        return false;
+      }
     }
 
     if (cfg_.prefer_mpp_jpeg_decoder) {
@@ -585,14 +602,15 @@ class Encoder::Impl {
         return false;
       }
 
-      if ((pkt_->flags & AV_PKT_FLAG_KEY) != 0) {
-        out_packet.is_keyframe = true;
+      if (!append_packet_payload(pkt_, out_packet)) {
+        av_packet_unref(pkt_);
+        return false;
       }
-
-      const size_t old_size = out_packet.payload.size();
-      out_packet.payload.resize(old_size + static_cast<size_t>(pkt_->size));
-      std::memcpy(out_packet.payload.data() + old_size, pkt_->data, static_cast<size_t>(pkt_->size));
       av_packet_unref(pkt_);
+    }
+
+    if (!drain_bsf(out_packet)) {
+      return false;
     }
 
     if (debug_enabled_ && out_packet.payload.empty()) {
@@ -913,17 +931,133 @@ class Encoder::Impl {
         return false;
       }
 
-      if ((pkt_->flags & AV_PKT_FLAG_KEY) != 0) {
-        out_packet.is_keyframe = true;
+      if (!append_packet_payload(pkt_, out_packet)) {
+        av_packet_unref(pkt_);
+        return false;
       }
-
-      const size_t old_size = out_packet.payload.size();
-      out_packet.payload.resize(old_size + static_cast<size_t>(pkt_->size));
-      std::memcpy(out_packet.payload.data() + old_size, pkt_->data, static_cast<size_t>(pkt_->size));
       av_packet_unref(pkt_);
     }
 
     return !out_packet.payload.empty();
+  }
+
+  bool init_hevc_annexb_bsf() {
+    const AVBitStreamFilter* bsf = av_bsf_get_by_name("hevc_mp4toannexb");
+    if (!bsf) {
+      return false;
+    }
+
+    int ret = av_bsf_alloc(bsf, &bsf_ctx_);
+    if (ret < 0 || !bsf_ctx_) {
+      return false;
+    }
+
+    ret = avcodec_parameters_from_context(bsf_ctx_->par_in, ctx_);
+    if (ret < 0) {
+      av_bsf_free(&bsf_ctx_);
+      return false;
+    }
+    bsf_ctx_->time_base_in = ctx_->time_base;
+
+    ret = av_bsf_init(bsf_ctx_);
+    if (ret < 0) {
+      av_bsf_free(&bsf_ctx_);
+      return false;
+    }
+
+    bsf_pkt_ = av_packet_alloc();
+    if (!bsf_pkt_) {
+      av_bsf_free(&bsf_ctx_);
+      return false;
+    }
+
+    if (debug_enabled_) {
+      std::cerr << "[Encoder][debug] hevc_mp4toannexb bsf enabled" << std::endl;
+    }
+    return true;
+  }
+
+  bool append_raw_packet(const AVPacket* packet, EncodedPacket& out_packet) {
+    if (!packet || packet->size <= 0 || !packet->data) {
+      return false;
+    }
+
+    if ((packet->flags & AV_PKT_FLAG_KEY) != 0) {
+      out_packet.is_keyframe = true;
+    }
+
+    const size_t old_size = out_packet.payload.size();
+    out_packet.payload.resize(old_size + static_cast<size_t>(packet->size));
+    std::memcpy(out_packet.payload.data() + old_size, packet->data, static_cast<size_t>(packet->size));
+    return true;
+  }
+
+  bool append_packet_payload(const AVPacket* packet, EncodedPacket& out_packet) {
+    if (!bsf_ctx_) {
+      return append_raw_packet(packet, out_packet);
+    }
+
+    int ret = av_bsf_send_packet(bsf_ctx_, const_cast<AVPacket*>(packet));
+    if (ret < 0) {
+      if (debug_enabled_) {
+        std::cerr << "[Encoder][debug] av_bsf_send_packet failed: " << ff_err_str(ret) << std::endl;
+      }
+      return false;
+    }
+
+    while (true) {
+      ret = av_bsf_receive_packet(bsf_ctx_, bsf_pkt_);
+      if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+        break;
+      }
+      if (ret < 0) {
+        if (debug_enabled_) {
+          std::cerr << "[Encoder][debug] av_bsf_receive_packet failed: " << ff_err_str(ret) << std::endl;
+        }
+        return false;
+      }
+
+      if (!append_raw_packet(bsf_pkt_, out_packet)) {
+        av_packet_unref(bsf_pkt_);
+        return false;
+      }
+      av_packet_unref(bsf_pkt_);
+    }
+
+    return true;
+  }
+
+  bool drain_bsf(EncodedPacket& out_packet) {
+    if (!bsf_ctx_) {
+      return true;
+    }
+
+    int ret = av_bsf_send_packet(bsf_ctx_, nullptr);
+    if (ret < 0 && ret != AVERROR_EOF) {
+      if (debug_enabled_) {
+        std::cerr << "[Encoder][debug] av_bsf_send_packet(null) failed: " << ff_err_str(ret) << std::endl;
+      }
+      return false;
+    }
+
+    while (true) {
+      ret = av_bsf_receive_packet(bsf_ctx_, bsf_pkt_);
+      if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
+        break;
+      }
+      if (ret < 0) {
+        if (debug_enabled_) {
+          std::cerr << "[Encoder][debug] av_bsf_receive_packet(drain) failed: " << ff_err_str(ret) << std::endl;
+        }
+        return false;
+      }
+      if (!append_raw_packet(bsf_pkt_, out_packet)) {
+        av_packet_unref(bsf_pkt_);
+        return false;
+      }
+      av_packet_unref(bsf_pkt_);
+    }
+    return true;
   }
 
  private:
@@ -932,6 +1066,8 @@ class Encoder::Impl {
   AVCodecContext* ctx_ = nullptr;
   const AVCodec* codec_ = nullptr;
   AVPacket* pkt_ = nullptr;
+  AVBSFContext* bsf_ctx_ = nullptr;
+  AVPacket* bsf_pkt_ = nullptr;
 
   std::vector<uint8_t> nv12_buffer_;
   std::vector<uint8_t> tmp_bgr_resized_;

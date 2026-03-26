@@ -13,6 +13,12 @@ class RgaConverter {
                       int dst_w,
                       int dst_h,
                       cv::Mat& rgb_out);
+  int nv12_dma_to_bgr(int src_fd,
+                      int src_w,
+                      int src_h,
+                      int dst_w,
+                      int dst_h,
+                      cv::Mat& bgr_out);
 };
 
 }  // namespace hwcodec_core

@@ -31,7 +31,13 @@ int main(int argc, char** argv) {
   std::string input_path;
   std::string output_path;
   if (!get_arg(argc, argv, "--input", input_path) || !get_arg(argc, argv, "--output", output_path)) {
-    std::cerr << "Usage: hw_encode_jpeg --input in.jpg --output out.h265 [--width 1920 --height 1080 --fps 25]" << std::endl;
+    std::cerr << "Usage: hw_encode_jpeg --input in.jpg --output out.h265 "
+              << "[--width 1920 --height 1080 --fps 25 --debug 1 "
+              << "--qp-min 10 --qp-max 48 "
+              << "--prefer-mpp-jpeg 1 --jpeg-mpp-timeout-ms 0 "
+              << "--jpeg-mpp-put-retry 5 --jpeg-mpp-get-retry 20 "
+              << "--jpeg-mpp-put-sleep-ms 1 --jpeg-mpp-get-sleep-ms 1 "
+              << "--jpeg-mpp-eos 0]" << std::endl;
     return 1;
   }
 
@@ -46,6 +52,16 @@ int main(int argc, char** argv) {
   cfg.width = get_arg_int(argc, argv, "--width", 1920);
   cfg.height = get_arg_int(argc, argv, "--height", 1080);
   cfg.fps = get_arg_int(argc, argv, "--fps", 25);
+  cfg.qp_min = get_arg_int(argc, argv, "--qp-min", 10);
+  cfg.qp_max = get_arg_int(argc, argv, "--qp-max", 48);
+  cfg.prefer_mpp_jpeg_decoder = (get_arg_int(argc, argv, "--prefer-mpp-jpeg", 1) != 0);
+  cfg.jpeg_mpp_output_timeout_ms = get_arg_int(argc, argv, "--jpeg-mpp-timeout-ms", 0);
+  cfg.jpeg_mpp_put_retry = get_arg_int(argc, argv, "--jpeg-mpp-put-retry", 5);
+  cfg.jpeg_mpp_get_retry = get_arg_int(argc, argv, "--jpeg-mpp-get-retry", 20);
+  cfg.jpeg_mpp_put_retry_sleep_ms = get_arg_int(argc, argv, "--jpeg-mpp-put-sleep-ms", 1);
+  cfg.jpeg_mpp_get_retry_sleep_ms = get_arg_int(argc, argv, "--jpeg-mpp-get-sleep-ms", 1);
+  cfg.jpeg_mpp_set_packet_eos = (get_arg_int(argc, argv, "--jpeg-mpp-eos", 0) != 0);
+  cfg.debug = (get_arg_int(argc, argv, "--debug", 0) != 0);
 
   hwcodec_core::Encoder encoder;
   if (!encoder.init(cfg)) {
@@ -55,8 +71,11 @@ int main(int argc, char** argv) {
 
   hwcodec_core::EncodedPacket packet;
   if (!encoder.encode_jpeg(jpeg.data(), jpeg.size(), packet)) {
-    std::cerr << "encode failed" << std::endl;
-    return 1;
+    std::cerr << "encode returned no packet, try flush delayed packets..." << std::endl;
+    if (!encoder.flush(packet)) {
+      std::cerr << "encode failed" << std::endl;
+      return 1;
+    }
   }
 
   std::ofstream ofs(output_path, std::ios::binary);

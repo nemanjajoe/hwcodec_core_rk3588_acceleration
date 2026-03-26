@@ -10,6 +10,14 @@ struct DecoderConfig {
   int width = 1920;
   int height = 1080;
   int jpeg_quality = 80;
+  int mpp_split_mode = 1;
+  // MPP timeout semantics: 0=non-block, <0=block, >0=timeout(ms).
+  int mpp_output_timeout_ms = 0;
+  int mpp_put_retry = 5;
+  int mpp_get_retry = 15;
+  int mpp_put_retry_sleep_ms = 2;
+  int mpp_get_retry_sleep_ms = 1;
+  bool debug = false;
 };
 
 class Decoder {

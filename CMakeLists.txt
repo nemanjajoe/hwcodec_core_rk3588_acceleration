@@ -58,10 +58,13 @@ if(HWCODEC_BUILD_APPS)
   add_executable(hw_decode_h265 apps/hw_decode_h265.cpp)
   target_link_libraries(hw_decode_h265 PRIVATE hwcodec_core)
 
+  add_executable(ffmpeg_rkmpp_probe apps/ffmpeg_rkmpp_probe.cpp)
+
   if(HWCODEC_FFMPEG_RPATH)
     target_link_directories(hw_encode_jpeg PRIVATE ${HWCODEC_FFMPEG_ROOT}/lib)
     target_link_directories(hw_decode_h265 PRIVATE ${HWCODEC_FFMPEG_ROOT}/lib)
-    set_target_properties(hw_encode_jpeg hw_decode_h265 PROPERTIES
+    target_link_directories(ffmpeg_rkmpp_probe PRIVATE ${HWCODEC_FFMPEG_ROOT}/lib)
+    set_target_properties(hw_encode_jpeg hw_decode_h265 ffmpeg_rkmpp_probe PROPERTIES
       BUILD_RPATH "${HWCODEC_FFMPEG_ROOT}/lib"
       INSTALL_RPATH "${HWCODEC_FFMPEG_ROOT}/lib"
     )
@@ -70,7 +73,7 @@ endif()
 
 set(HWCODEC_INSTALL_TARGETS hwcodec_core)
 if(HWCODEC_BUILD_APPS)
-  list(APPEND HWCODEC_INSTALL_TARGETS hw_encode_jpeg hw_decode_h265)
+  list(APPEND HWCODEC_INSTALL_TARGETS hw_encode_jpeg hw_decode_h265 ffmpeg_rkmpp_probe)
 endif()
 
 install(TARGETS ${HWCODEC_INSTALL_TARGETS}

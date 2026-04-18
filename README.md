@@ -433,7 +433,7 @@ After upgrading `librga`, `MPP`, or `ffmpeg-rockchip`:
 
 ### License
 
-[Specify your license here]
+Apache License 2.0
 
 ### Contributing
 
@@ -876,7 +876,7 @@ if (dec.decode_to_jpeg(pkt, jpeg_out)) {
 
 ### License
 
-[请指定您的许可证]
+Apache License 2.0
 
 ### Contributing
 

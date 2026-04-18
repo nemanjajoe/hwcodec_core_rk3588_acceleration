@@ -86,7 +86,7 @@ cmake --build build -j8
 cmake --install build
 ```
 
-## 5. API 参考（Google 风格）
+## 5. API 参考
 
 本节采用“概览 -> 签名 -> 参数 -> 返回值 -> 失败语义 -> 线程安全”的结构，便于快速查阅与联调。
 
